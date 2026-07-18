@@ -8,7 +8,7 @@ or memorizing `ollama pull` / `ollama rm` invocations.
 ┌ OLLAMA MODEL MANAGER ──────────────────────────────────────────────┐
 │ ▼ Ollama Models                                                    │
 │   ▼ Local Models                                                   │
-│     [x] llama3.2:latest                            [Installed]     │
+│     [x] llama3.2:latest                             [Installed]    │
 │     [x] mirage335/Qwen3-Coder-30b-virtuoso:latest   [Installed]    │
 │   ▼ Cloud Models                                                   │
 │     [x] deepseek-v4-flash:cloud                     [Installed]    │
