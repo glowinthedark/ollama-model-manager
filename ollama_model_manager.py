@@ -17,17 +17,20 @@ import re
 import webbrowser
 
 LOCAL_API_URL = "http://localhost:11434/api/tags"
-CLOUD_API_URL = "https://ollamadb.dev/api/v1/models"
+CLOUD_API_URL = "https://ollamadb.dev/api/v1/models" ## (temporarily[?] down)
 LIBRARY_FALLBACK_URL = "https://ollama.com/library"
 
 HARDCODED_FALLBACK = [
-    "llama4", "gemma4", "qwen3.6", "gpt-oss"
+    "llama3.2", "phi3", "mistral", "gemma2", "qwen2.5", "mixtral", "llava",
+    "deepseek-r1", "qwen3", "gpt-oss",
 ]
 
 
 def canonical(name):
     """Base identity of a model name, ignoring the :tag suffix.
-    Namespace (e.g. 'mirage335/foo') is NEVER stripped"""
+    Namespace (e.g. 'mirage335/foo') is NEVER stripped -- only the part
+    after the first ':' is dropped for comparison purposes. Display strings
+    always keep the original, untouched name."""
     return name.split(":", 1)[0]
 
 
@@ -51,12 +54,25 @@ class ConfirmDialog:
         self.selected = 0  # 0 = Confirm, 1 = Cancel
 
 
+class TagPickerDialog:
+    """Modal variant-picker shown when the user checks a bare (untagged)
+    Available Models entry that has more than one pullable tag -- e.g.
+    'qwen3.6' resolves to qwen3.6:latest, qwen3.6:27b, qwen3.6:35b-a3b, etc.
+    Only the exact pull string and its download size are shown, per spec:
+    everything else on the ollama.com tags page (context window, modality,
+    digest, relative date) is noise for a "what do I pull" decision."""
+    def __init__(self, base, options):
+        self.base = base            # canonical model name these tags belong to
+        self.options = options      # list of (pull_name, size_str), sorted
+        self.selected = 0
+
+
 class OllamaTUI:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         curses.curs_set(0)
-        curses.start_color()
-        curses.use_default_colors()
+        curses.start_color()          # was missing: use_default_colors()/init_pair()
+        curses.use_default_colors()   # require start_color() to have been called first
 
         curses.init_pair(1, curses.COLOR_CYAN, -1)
         curses.init_pair(2, curses.COLOR_GREEN, -1)
@@ -110,7 +126,7 @@ class OllamaTUI:
             }
         ]
 
-        # installed models are pre-checked.
+        # Requirement 1: installed models are pre-checked.
         self.checked = {canonical(m) for m in self.installed_models}
 
         self.visible_lines = []
@@ -120,6 +136,11 @@ class OllamaTUI:
         self.tree_offset_y = 0
         self.focus = "tree"          # 'tree' | 'apply' | 'quit'
         self.dialog = None           # ConfirmDialog or None
+        self.tag_picker = None       # TagPickerDialog or None
+        self.is_fetching_tags = False
+        self.selected_tag_for_install = {}  # canonical(base) -> exact pull string
+                                             # chosen via the tag picker, overrides
+                                             # the default bare-name (:latest) pull
 
         self.needs_redraw = True     # anti-flicker: only paint on real changes
 
@@ -162,13 +183,14 @@ class OllamaTUI:
         models = []
 
         # Attempt 1: ollamadb.dev community API (validated live endpoint).
-        self.log(f"Querying community model catalog ({CLOUD_API_URL}) ...")
-        try:
-            models = self._fetch_from_ollamadb()
-            if models:
-                self.log(f"Retrieved {len(models)} model(s) from ollamadb.dev.")
-        except Exception as e:
-            self.log(f"WARNING: ollamadb.dev query failed: {e}")
+        # this is a DEAD parrot!
+        # self.log(f"Querying community model catalog ({CLOUD_API_URL}) ...")
+        # try:
+        #     models = self._fetch_from_ollamadb()
+        #     if models:
+        #         self.log(f"Retrieved {len(models)} model(s) from ollamadb.dev.")
+        # except Exception as e:
+        #     self.log(f"WARNING: ollamadb.dev query failed: {e}")
 
         # Attempt 2: scrape the official library index as fallback.
         if not models:
@@ -265,6 +287,103 @@ class OllamaTUI:
         'deepseek-v4-flash:cloud') that a bare canonical match would hide."""
         target = canonical(leaf_name)
         return [m for m in self.installed_models if canonical(m) == target]
+
+    def fetch_model_tags(self, base):
+        """Live-fetch the pullable tag variants for one model from its
+        ollama.com library page, e.g. https://ollama.com/library/qwen3.6/tags.
+        Returns a sorted list of (pull_name, size_str) -- only the exact
+        string to hand to `ollama pull` and its download size, since that's
+        what actually matters for picking a variant (context window,
+        modality, and digest shown on that page are not).
+
+        Best-effort HTML scrape against an undocumented page (there is no
+        JSON API for per-model tag enumeration as of this writing) -- kept
+        deliberately tolerant of markup drift: it locates tag links by their
+        href alone, then searches the *text between one tag link and the
+        next* for a size figure, rather than assuming any particular tag
+        nesting. Returns [] on any failure so callers can fall back to a
+        plain bare-name pull (which resolves to :latest)."""
+        if "/" in base:
+            # No verified tags-page URL convention for namespaced community
+            # models (only the official /library/<name>/tags path is
+            # confirmed) -- skip rather than guess.
+            self.log(f"Tag listing is only available for official models; "
+                      f"skipping variant lookup for '{base}'.")
+            return []
+
+        url = f"https://ollama.com/library/{urllib.parse.quote(base)}/tags"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=6) as response:
+                html = response.read().decode(errors="replace")
+        except Exception as e:
+            self.log(f"WARNING: Could not fetch tag list for '{base}': {e}")
+            return []
+
+        href_pattern = re.compile(rf'href="/library/{re.escape(base)}:([A-Za-z0-9._\-]+)"')
+        matches = list(href_pattern.finditer(html))
+        if not matches:
+            self.log(f"WARNING: No tag variants found on {url} "
+                      f"(page layout may have changed).")
+            return []
+
+        results = {}
+        for i, m in enumerate(matches):
+            pull_name = f"{base}:{m.group(1)}"
+            if pull_name in results:
+                continue
+            chunk_end = matches[i + 1].start() if i + 1 < len(matches) else min(len(html), m.end() + 2000)
+            chunk = html[m.end():chunk_end]
+            size_match = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', chunk)
+            results[pull_name] = f"{size_match.group(1)}{size_match.group(2)}" if size_match else "size unknown"
+
+        return sorted(results.items())
+
+    def toggle_leaf(self, node):
+        """Single entry point for checking/unchecking a leaf, used by both
+        Space and Enter. Tagged leaves (Local/Cloud Models, or a fully
+        specified name) toggle immediately -- there's no ambiguity about
+        which variant. Bare leaves (Available Models catalog entries) may
+        have several pullable tags, so checking one kicks off the tag-picker
+        flow instead of immediately assuming :latest."""
+        name = node["name"]
+        c = canonical(name)
+        if c in self.checked:
+            self.checked.discard(c)
+            self.selected_tag_for_install.pop(c, None)
+            return
+        if ":" in name:
+            self.checked.add(c)
+            return
+        self.begin_tag_selection(c)
+
+    def begin_tag_selection(self, base):
+        if self.is_fetching_tags:
+            self.log("Already fetching a tag list; please wait.")
+            return
+        self.is_fetching_tags = True
+        self.log(f"Fetching available tags for '{base}' ...")
+
+        def worker():
+            options = self.fetch_model_tags(base)
+            with self.state_lock:
+                if not options:
+                    self.log(f"Defaulting '{base}' to its :latest tag "
+                              f"(no specific variant list available).")
+                    self.checked.add(base)
+                    self.selected_tag_for_install.pop(base, None)
+                elif len(options) == 1:
+                    pull_name, size_str = options[0]
+                    self.checked.add(base)
+                    self.selected_tag_for_install[base] = pull_name
+                    self.log(f"Only one variant available: {pull_name} "
+                              f"({size_str}) -- selected automatically.")
+                else:
+                    self.log(f"Found {len(options)} variant(s) for '{base}'.")
+                    self.tag_picker = TagPickerDialog(base, options)
+                self.is_fetching_tags = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def get_model_url(self, leaf_name):
         """Resolve the ollama.com page for a model. Prefers the URL the
@@ -381,14 +500,49 @@ class OllamaTUI:
                 color = curses.color_pair(4) if key == "apply" else curses.color_pair(5)
                 self.safe_addstr(h - 1, x, btn_str, color | curses.A_BOLD)
 
-        hint = "Tab/Shift+Tab: switch panel | Space/Enter: toggle | Left/Right/Enter: collapse/expand | i: model info"
+        hint = "Tab/Shift+Tab: panel | Space/Enter: toggle (picks a tag variant) | i: model info"
         self.safe_addstr(h - 3, 0, hint[: max(0, w - 1)], curses.A_DIM)
 
-        if self.dialog is not None:
+        if self.tag_picker is not None:
+            self.draw_tag_picker()
+        elif self.dialog is not None:
             self.draw_dialog()
 
         self.stdscr.noutrefresh()
         curses.doupdate()
+
+    def draw_tag_picker(self):
+        h, w = self.stdscr.getmaxyx()
+        dlg = self.tag_picker
+        header = f"Select a variant of '{dlg.base}' to install:"
+        rows = [f"{name}  ({size})" for name, size in dlg.options]
+
+        box_w = min(w - 4, max([len(header)] + [len(r) for r in rows]) + 6)
+        max_visible = max(1, min(len(rows), h - 8))
+        box_h = min(h - 4, max_visible + 4)
+        y0 = max(0, (h - box_h) // 2)
+        x0 = max(0, (w - box_w) // 2)
+
+        for dy in range(box_h):
+            self.safe_addstr(y0 + dy, x0, " " * box_w, curses.color_pair(3))
+
+        self.safe_addstr(y0 + 1, x0 + 2, header[: box_w - 4],
+                          curses.color_pair(3) | curses.A_BOLD)
+
+        visible_opts = box_h - 3
+        start = 0
+        if dlg.selected >= visible_opts:
+            start = dlg.selected - visible_opts + 1
+        for i in range(visible_opts):
+            idx = start + i
+            if idx >= len(rows):
+                break
+            prefix = "> " if idx == dlg.selected else "  "
+            attr = (curses.color_pair(2) | curses.A_BOLD) if idx == dlg.selected else curses.color_pair(3)
+            self.safe_addstr(y0 + 2 + i, x0 + 2, (prefix + rows[idx])[: box_w - 4], attr)
+
+        hint = "Up/Down: choose | Enter: select | Esc: cancel"
+        self.safe_addstr(y0 + box_h - 1, x0 + 2, hint[: box_w - 4], curses.color_pair(3))
 
     def draw_dialog(self):
         h, w = self.stdscr.getmaxyx()
@@ -459,7 +613,10 @@ class OllamaTUI:
         to_install_canon = self.checked - installed_canonicals
         to_uninstall_canon = installed_canonicals - self.checked
 
-        to_install = [cloud_name_by_canon.get(c, c) for c in sorted(to_install_canon)]
+        to_install = [
+            self.selected_tag_for_install.get(c, cloud_name_by_canon.get(c, c))
+            for c in sorted(to_install_canon)
+        ]
         to_uninstall = [name for c in sorted(to_uninstall_canon)
                          for name in installed_canon_map[c]]
         return to_install, to_uninstall
@@ -502,6 +659,7 @@ class OllamaTUI:
                     for m in self.installed_models if is_cloud_tag(m)
                 ]
                 self.checked = {canonical(m) for m in self.installed_models}
+                self.selected_tag_for_install.clear()
                 self.update_visible_lines()
             self.log("--- All tasks completed ---")
             self.is_processing = False
@@ -530,10 +688,35 @@ class OllamaTUI:
             self.dialog = None
         return True
 
+    def handle_tag_picker_input(self, key):
+        dlg = self.tag_picker
+        if key == curses.KEY_UP and dlg.selected > 0:
+            dlg.selected -= 1
+        elif key == curses.KEY_DOWN and dlg.selected < len(dlg.options) - 1:
+            dlg.selected += 1
+        elif key in (10, 13):  # Enter confirms the highlighted variant
+            pull_name, size_str = dlg.options[dlg.selected]
+            self.checked.add(dlg.base)
+            self.selected_tag_for_install[dlg.base] = pull_name
+            self.log(f"Selected {pull_name} ({size_str}) for installation.")
+            self.tag_picker = None
+        elif key in (27, ord('n'), ord('N')):  # Esc/cancel
+            self.log(f"Tag selection cancelled for '{dlg.base}'.")
+            self.tag_picker = None
+        return True
+
     def handle_input(self, key):
         """Returns True to keep running, False to quit."""
+        if self.tag_picker is not None:
+            return self.handle_tag_picker_input(key)
+
         if self.dialog is not None:
             return self.handle_dialog_input(key)
+
+        if self.is_fetching_tags:
+            if key in (ord('q'), ord('Q')):
+                self.log("Fetching tag list; please wait a moment.")
+            return True
 
         if self.is_processing:
             if key in (ord('q'), ord('Q')):
@@ -557,22 +740,14 @@ class OllamaTUI:
             elif key == ord(' '):
                 node, _ = self.visible_lines[self.selected_row]
                 if not node["is_group"]:
-                    c = canonical(node["name"])
-                    if c in self.checked:
-                        self.checked.remove(c)
-                    else:
-                        self.checked.add(c)
+                    self.toggle_leaf(node)
             elif key in (10, 13):  # Enter
                 node, _ = self.visible_lines[self.selected_row]
                 if node["is_group"]:
                     node["expanded"] = not node["expanded"]
                     self.update_visible_lines()
                 else:
-                    c = canonical(node["name"])
-                    if c in self.checked:
-                        self.checked.remove(c)
-                    else:
-                        self.checked.add(c)
+                    self.toggle_leaf(node)
             elif key == curses.KEY_RIGHT:
                 node, depth = self.visible_lines[self.selected_row]
                 if node["is_group"]:
