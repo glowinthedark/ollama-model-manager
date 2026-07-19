@@ -56,10 +56,6 @@ No install step, no virtualenv, no pip requirements file — it's one file.
 
 ## The tree, and what each branch actually means
 
-This is the part worth reading carefully, because "cloud" is an
-overloaded word in the Ollama ecosystem and this tool deliberately picks
-one precise meaning for it and uses it consistently everywhere.
-
 ```
 Ollama Models
 ├── Local Models       registered on this machine, real weight blobs on disk,
@@ -70,23 +66,11 @@ Ollama Models
 │                      Inference for these actually runs on Ollama's own
 │                      infrastructure, not on your machine. Requires network
 │                      access at inference time even though it's "installed".
-└── Available Models   the remote catalog (ollamadb.dev / ollama.com) of
-                       everything you could still pull — a mix of ordinary
-                       local-weight models and remote `:cloud` models,
-                       not yet registered on this machine
+└── Available Models   the remote catalog (llama.com) of
+                       everything you can pull — both
+                       local-weight models and remote `:cloud` models
 ```
 
-**Why the split matters:** grouping "Local Models" and "Cloud Models"
-together under one generic "installed" label would silently misrepresent
-disk usage, offline-readiness, and network dependency for the `:cloud`
-entries. This tool treats "installed/registered" (state) and "cloud vs.
-local" (execution locality) as two independent axes, and the tree reflects
-both without conflating them.
-
-A model can appear **twice** — once under Local/Cloud Models (if
-registered) and once under Available Models (the catalog is not aware of
-your local state). The `[Installed ...]` badge and the pre-checked
-checkbox keep those two views in sync (see below).
 
 ### Checkbox identity: canonical names
 
@@ -116,7 +100,7 @@ removal.
 | `↑` / `↓`           | Model tree        | Move selection                                        |
 | `→`                 | Model tree        | Expand a collapsed group, or jump into its first child|
 | `←`                 | Model tree        | Collapse an expanded group, or jump to the parent row |
-| `Space` or `Enter`  | Model tree (leaf) | Toggle the checkbox                                   |
+| `Space` or `Enter`  | Model tree (leaf) | Toggle the checkbox (see "Picking a tag variant" below)|
 | `Enter`             | Model tree (group)| Expand/collapse (same as `→`/`←`)                     |
 | `i`                 | Model tree (leaf) | Open the model's `ollama.com` page in your browser    |
 | `Tab` / `Shift+Tab` | Anywhere          | Cycle focus: Model Panel → Apply → Quit → Model Panel |
@@ -126,6 +110,36 @@ removal.
 | `←`/`→`/`Tab`       | Confirm dialog    | Switch between Confirm / Cancel                        |
 | `Enter`             | Confirm dialog    | Activate the highlighted button                        |
 | `y` / `n` / `Esc`   | Confirm dialog    | Confirm / Cancel / Cancel                              |
+| `↑` / `↓`           | Tag picker        | Move between variants                                  |
+| `Enter`             | Tag picker        | Select the highlighted variant                          |
+| `Esc` / `n`         | Tag picker        | Cancel (leaves the model unchecked)     
+
+## Picking a tag variant
+
+Many models publish more than one pullable tag — different sizes,
+quantizations, or hardware-specific builds (MLX, etc.). Checking a bare
+entry under **Available Models** (e.g. `qwen3.6`, with no `:tag`) doesn't
+just assume `:latest`:
+
+1. The app live-fetches `https://ollama.com/library/<model>/tags` in a
+   background thread (the UI stays responsive; progress is logged).
+2. If there's more than one variant, a picker opens showing only what
+   matters for the decision — the exact string `ollama pull` needs and its
+   download size, e.g.:
+
+   ```
+   Select a variant of 'qwen3.6' to install:
+   > qwen3.6:latest        (24GB)
+     qwen3.6:27b            (17GB)
+     qwen3.6:27b-coding-mxfp8  (31GB)
+     qwen3.6:35b-a3b-mtp-bf16  (72GB)
+   ```
+
+   `↑`/`↓` to move, `Enter` to pick, `Esc`/`n` to cancel without checking
+   anything.
+3. If the model only has one tag, or the fetch fails for any reason, the
+   app logs why and falls back to the old behavior — checking the bare
+   name, which `ollama pull` resolves to `:latest` on its own.
 
 ## The Apply workflow
 
@@ -166,38 +180,7 @@ the error and continues with zero installed models rather than crashing.
    or returns nothing. Limitation: this page only lists official,
    non-namespaced models; community/namespaced models are invisible via
    this path.
-3. **Small hardcoded list** — last-resort safety net so the UI is never
-   completely empty even with no network at all.
 
 Every step of this chain — which source was tried, how many results it
 returned, and any failure — is echoed to the Log panel as it happens.
 
-## Design notes / known limitations
-
-- **Available Models can't yet distinguish, per-entry, which specific
-  tags are local-weight vs. `:cloud`.** The catalog API returns a tag
-  *count* per model family, not the enumerated tag list, so knowing in
-  advance that (say) `qwen3:235b-cloud` exists as a pullable tag would
-  require a further per-model lookup (e.g. `ollama.com`'s model page or
-  `/api/show`). This is only a gap for models you *don't* have installed
-  yet; once something is registered, its exact tag is always shown
-  correctly under Local/Cloud Models.
-- **Checkbox identity is per canonical name, not per exact tag.** If you
-  have both `llama3:8b` and `llama3:70b` registered, unchecking either
-  will target that specific exact install for removal (each is its own
-  row), but the Available Models entry `llama3` reflects "installed" as
-  soon as *any* tag of it is present.
-- **Redraws are event-driven, not timer-driven**, to avoid the flicker
-  that comes from unconditionally clearing and repainting the whole
-  screen every tick. The screen only repaints on a keypress, new log
-  output, or while a pull/remove is actively streaming output.
-- Requires the `ollama` binary to exist on `PATH` for Apply to do
-  anything; if it's missing, each queued command logs a clear error
-  instead of crashing the process.
-
-## File layout
-
-Everything lives in `ollama-model-manager.py` — no package, no build
-step, no config file. It's meant to be read top-to-bottom in one sitting;
-the module docstring at the top of the file summarizes every design
-decision with a one-line pointer back into this README's explanations.
