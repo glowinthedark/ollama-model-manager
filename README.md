@@ -1,8 +1,7 @@
 # Ollama Model Manager
 
-A single-file, dependency-free curses TUI for browsing, installing, and
-removing [Ollama](https://ollama.com) models — without leaving the terminal
-or memorizing `ollama pull` / `ollama rm` invocations.
+A single-file, zero-dependencies curses TUI for browsing, installing, and
+uninstalling [Ollama](https://ollama.com) models — wraps `ollama pull` and `ollama rm` commands for you.
 
 ```
 ┌ OLLAMA MODEL MANAGER ──────────────────────────────────────────────┐
@@ -26,74 +25,48 @@ or memorizing `ollama pull` / `ollama rm` invocations.
 
 ## Why this exists
 
-`ollama pull` and `ollama rm` are fine one at a time, but there's no
-built-in way to: see everything installed alongside everything
-*available*, batch-select several models, or double-check exactly what's
-about to change before it happens. This tool is that missing layer — a
-checkbox tree over your local install state and the remote catalog, with
-one `Apply` action that diffs the two and asks for confirmation.
+The TUI shows installed models as well as all models
+*available* for installation. You can batch-select several models to install/uninstall 
+and then `Apply` will run the corresponding `ollama pull` / `ollama rm` commands.
 
 ## Requirements
 
 - Python 3.8+ (uses only the standard library: `curses`, `urllib`,
   `subprocess`, `threading`, `queue`, `webbrowser`, `json`, `re`)
-- `ollama` CLI on your `PATH` (used for the actual `pull`/`rm` operations)
-- A running local Ollama daemon at `http://localhost:11434` (used only to
-  *list* what's currently installed — the app still runs without it, just
+- `ollama` CLI on your `PATH` (used for `pull`/`rm` operations)
+- A running local Ollama daemon at `http://localhost:11434` (used to
+  *list* what's currently installed — the app runs without it, just
   showing zero installed models)
 - A terminal with `curses` support (Linux/macOS natively; on Windows, run
-  it under WSL or install `windows-curses`)
-- Outbound internet access, *optional* — only needed to populate the
+   under WSL or install `windows-curses`)
+- Internet access, *optional* — needed to populate the
   **Available Models** catalog. Everything else works fully offline.
 
-## Running it
+## Usage
 
 ```bash
 python3 ollama-model-manager.py
 ```
 
-No install step, no virtualenv, no pip requirements file — it's one file.
+No install step, no virtualenv, no pip requirements file — it's a single standalone file.
 
-## The tree, and what each branch actually means
+## UI: what each branch means
 
 ```
 Ollama Models
 ├── Local Models       registered on this machine, real weight blobs on disk,
 │                      works fully offline
 ├── Cloud Models       registered on this machine (shows up in `ollama ls`),
-│                      but tagged `:cloud` (or `:<size>-cloud`) — this is a
+│                      tagged with `:cloud` (or `:<size>-cloud`) — this is a
 │                      shallow Modelfile/manifest pull with NO weight blobs.
-│                      Inference for these actually runs on Ollama's own
-│                      infrastructure, not on your machine. Requires network
-│                      access at inference time even though it's "installed".
-└── Available Models   the remote catalog (llama.com) of
+│                      Inference for these runs on Ollama's servers,
+│                      not on your machine. Requires internet.
+└── Available Models   the remote catalog (ollama.com) of
                        everything you can pull — both
                        local-weight models and remote `:cloud` models
 ```
 
-
-### Checkbox identity: canonical names
-
-Checkboxes are keyed by *canonical name* — the model name with any
-`:tag` suffix stripped, but namespaces (e.g. `mirage335/`) always kept.
-This means checking the bare `Available Models` entry for a model that's
-already registered under a specific tag (e.g. `llama3.2:latest`) is
-recognized as "no change," and unchecking a `Local Models` entry with a
-non-default tag correctly targets that exact registered install for
-removal.
-
-### The `[Installed ...]` badge
-
-- Under **Local Models** / **Cloud Models**, the display name already
-  contains the exact registered tag, so the badge just reads `[Installed]`.
-- Under **Available Models**, entries are bare/untagged (that's how the
-  catalog lists them), so if a tagged variant is registered, the badge
-  spells it out — e.g. `deepseek-v4-flash` shows `[Installed :cloud]`,
-  making it clear you have the cloud-proxy variant, not a real local
-  download. If multiple tags of the same model are registered, all of
-  them are listed, comma-separated.
-
-## Keybindings
+## Keyboard keys
 
 | Key(s)             | Context           | Action                                              |
 |---------------------|-------------------|------------------------------------------------------|
@@ -116,15 +89,12 @@ removal.
 
 ## Picking a tag variant
 
-Many models publish more than one pullable tag — different sizes,
-quantizations, or hardware-specific builds (MLX, etc.). Checking a bare
-entry under **Available Models** (e.g. `qwen3.6`, with no `:tag`) doesn't
-just assume `:latest`:
+For certain models multiple tags are available — different sizes,
+quantizations, or hardware-specific builds (MLX, etc):
 
-1. The app live-fetches `https://ollama.com/library/<model>/tags` in a
-   background thread (the UI stays responsive; progress is logged).
-2. If there's more than one variant, a picker opens showing only what
-   matters for the decision — the exact string `ollama pull` needs and its
+1. The app fetches `https://ollama.com/library/<model>/tags`.
+2. If there's more than one variant, a picker opens showing
+   the exact string `ollama pull` needs and its
    download size, e.g.:
 
    ```
@@ -137,14 +107,10 @@ just assume `:latest`:
 
    `↑`/`↓` to move, `Enter` to pick, `Esc`/`n` to cancel without checking
    anything.
-3. If the model only has one tag, or the fetch fails for any reason, the
-   app logs why and falls back to the old behavior — checking the bare
-   name, which `ollama pull` resolves to `:latest` on its own.
 
 ## The Apply workflow
 
-1. Check/uncheck whatever you want installed or removed, anywhere in the
-   tree.
+1. Check/uncheck whatever you want installed or removed, anywhere in the tree.
 2. Focus **Apply** (`Tab`) and activate it (`Space`/`Enter`).
 3. The app computes `checked − installed` (installs) and
    `installed − checked` (uninstalls) by canonical name.
@@ -152,35 +118,9 @@ just assume `:latest`:
      Apply never silently no-ops without telling you.
    - Otherwise: a modal lists exactly what will be pulled and what will
      be removed. **Nothing runs until you confirm.**
-4. On confirm, installs run first, then removals, each as a real
-   `ollama pull <name>` / `ollama rm <name>` subprocess with its exact
-   command line and every line of output streamed live into the Log
+4. On confirm, installs run first, then removals, each as a
+   `ollama pull <name>` / `ollama rm <name>` subprocess with full
+   command line and output streamed live into the Log
    panel.
-5. When finished, the local model list is re-fetched and the Local/Cloud
-   Models branches and checkbox state are rebuilt from the *actual*
-   post-apply state (not just assumed from what you clicked).
 
-## Data sources and fallback chain
-
-**Local installed models** — `GET http://localhost:11434/api/tags`
-(Ollama's native REST API). If the daemon isn't reachable, the app logs
-the error and continues with zero installed models rather than crashing.
-
-**Available Models catalog** — three-tier fallback, in order:
-
-1. **`https://ollamadb.dev/api/v1/models`** — a validated, live,
-   third-party community API ([frefrik/ollama-models-api](https://github.com/frefrik/ollama-models-api),
-   MIT-licensed, *not officially affiliated with Ollama*). Paginated
-   automatically; namespace and model name are reconstructed from the
-   documented `namespace`/`model_name` fields rather than trusting a
-   single flat field, so community/namespaced models keep their full
-   `namespace/model` prefix. The API's own per-model `url` field is
-   captured too, used by the `i` (model info) keybind when available.
-2. **Scrape of `https://ollama.com/library`** — used only if (1) fails
-   or returns nothing. Limitation: this page only lists official,
-   non-namespaced models; community/namespaced models are invisible via
-   this path.
-
-Every step of this chain — which source was tried, how many results it
-returned, and any failure — is echoed to the Log panel as it happens.
 
